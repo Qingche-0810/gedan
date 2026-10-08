@@ -19,8 +19,7 @@ jobs:
       - run: pip install pyinstaller pypinyin
       - run: pyinstaller --onefile --windowed --name 歌单排序 gedan.py
       # Releases 的附件名不收中文（会变成 default.exe），发布那份用英文名
-      - run: copy "dist\歌单排序.exe" "dist\gedan.exe"
-        shell: cmd
+      - run: Copy-Item "dist/歌单排序.exe" "dist/gedan.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: 歌单排序
