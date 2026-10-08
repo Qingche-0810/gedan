@@ -9,6 +9,6 @@
 - 「撤销上次编号」一键退回
 - 「出歌单 txt」生成带日期时间的歌单并打开
 
-exe 在 Releases 里下，双击就开，不用装任何东西。
+exe 在 Releases 里下：**gedan.exe**，双击就开，不用装任何东西。下载下来想改成「歌单排序.exe」随便改。
 
 源码 `gedan.py`，纯 Python + tkinter。打包由 GitHub Actions 在 Windows 机器上自动完成。

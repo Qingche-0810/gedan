@@ -18,6 +18,9 @@ jobs:
           python-version: "3.12"
       - run: pip install pyinstaller pypinyin
       - run: pyinstaller --onefile --windowed --name 歌单排序 gedan.py
+      # Releases 的附件名不收中文（会变成 default.exe），发布那份用英文名
+      - run: copy "dist\歌单排序.exe" "dist\gedan.exe"
+        shell: cmd
       - uses: actions/upload-artifact@v4
         with:
           name: 歌单排序
@@ -26,6 +29,6 @@ jobs:
         with:
           tag_name: latest
           name: 歌单排序（最新）
-          body: 双击 歌单排序.exe 就能用。改错了点「撤销上次编号」。
-          files: dist/歌单排序.exe
+          body: 下载 gedan.exe，双击就能用（想改成中文名随便改）。改错了点「撤销上次编号」。
+          files: dist/gedan.exe
           prerelease: false
