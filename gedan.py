@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""歌单排序 —— 给姥爷的 U 盘歌曲一键编号工具。
+"""歌单排序 —— 给家里老人的 U 盘歌曲一键编号工具。
 
 打开 U 盘 → 列表排好 → 想动就拖 → 一键编号 → 所有歌变成 001-xxx、002-xxx。
 """
@@ -47,7 +47,7 @@ def singer_of(clean_name):
 
 
 def is_marked(clean_name):
-    """姥爷手动加的 A 标记。"""
+    """老人手动加的 A 标记。"""
     return bool(re.match(r"^A(?![a-zA-Z])", clean_name))
 
 
