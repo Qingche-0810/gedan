@@ -149,9 +149,49 @@ def undo(folder):
     return len(plan)
 
 
-def write_playlist(folder, items):
+SETTINGS_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "歌单排序", "设置.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(d):
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(d, f, ensure_ascii=False, indent=1)
+
+
+def desktop_dir():
+    """桌面。Windows 问系统要真正的桌面位置（桌面被挪到别的盘、OneDrive 接管都认得出），要不到就用 ~/Desktop。"""
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(1024)
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buf) == 0 and os.path.isdir(buf.value):
+                return buf.value
+        except Exception:
+            pass
+    d = os.path.join(os.path.expanduser("~"), "Desktop")
+    return d if os.path.isdir(d) else os.path.expanduser("~")
+
+
+def playlist_dir(settings):
+    """歌单存哪：设置里钉过的那个目录；没钉过、或者那个目录没了，就是桌面。"""
+    d = settings.get("playlist_dir")
+    if d and os.path.isdir(d):
+        return d
+    return desktop_dir()
+
+
+def write_playlist(out_dir, items):
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    out = os.path.join(folder, f"歌单_{stamp}.txt")
+    out = os.path.join(out_dir, f"歌单_{stamp}.txt")
     with open(out, "w", encoding="gbk", errors="replace") as f:
         for i, (old, clean, ext) in enumerate(items, 1):
             f.write(f"{i:03d}  {clean}\n")
@@ -180,26 +220,55 @@ def run_gui():
     import tkinter as tk
     from tkinter import ttk, filedialog, messagebox
 
-    FONT = ("Microsoft YaHei UI", 14)
-    FONT_BIG = ("Microsoft YaHei UI", 15, "bold")
-    FONT_SMALL = ("Microsoft YaHei UI", 11)
+    # 系统缩放 125% / 150% / 175% 的电脑：不声明的话 Windows 会把整个窗口当图片放大，
+    # 960x680 放到 175% 就是 1680x1190，比屏幕还高，最下面一排按钮直接被吃掉（姥爷那台就是这样）。
+    # 声明了，Tk 就按真实 DPI 画，字号自己跟着缩放走，窗口大小我们再按屏幕封顶。
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            try:
+                ctypes.windll.shcore.SetProcessDpiAwareness(1)
+            except Exception:
+                ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
     root = tk.Tk()
     root.title("歌单排序")
-    root.geometry("960x680")
-    root.minsize(760, 520)
 
-    state = {"folder": None, "items": [], "drag_from": None, "view": []}
+    # scale：1.0 = 100%，1.75 = 175%。字号本来就是按老人眼睛挑大的，缩放再乘一遍就太大了——
+    # 超过 140% 的部分字号往回收一点（175% 的屏上看着跟 140% 一样大），行高和按钮边距跟着字走。
+    try:
+        scale = max(1.0, float(root.tk.call("tk", "scaling")) / (96 / 72))
+    except Exception:
+        scale = 1.0
+    font_k = min(scale, 1.4) / scale          # 字号系数（点数本身已被 Tk 按 DPI 放大）
+    px_k = min(scale, 1.4)                    # 像素尺寸系数（行高、边距）
+
+    def pt(n):
+        return max(8, round(n * font_k))
+
+    FONT = ("Microsoft YaHei UI", pt(14))
+    FONT_BIG = ("Microsoft YaHei UI", pt(15), "bold")
+    FONT_SMALL = ("Microsoft YaHei UI", pt(11))
+
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    w = min(round(960 * px_k), sw - 40)
+    h = min(round(680 * px_k), sh - 120)      # 留出任务栏和标题栏
+    root.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 30)}")
+    root.minsize(min(round(640 * px_k), w), min(round(420 * px_k), h))
+
+    state = {"folder": None, "items": [], "drag_from": None, "view": [], "settings": load_settings()}
 
     style = ttk.Style(root)
     try:
         style.theme_use("vista")
     except tk.TclError:
         pass
-    style.configure("Treeview", font=FONT, rowheight=38)
+    style.configure("Treeview", font=FONT, rowheight=round(38 * px_k))
     style.configure("Treeview.Heading", font=FONT)
-    style.configure("TButton", font=FONT, padding=(14, 8))
-    style.configure("Big.TButton", font=FONT_BIG, padding=(22, 10))
+    style.configure("TButton", font=FONT, padding=(round(14 * px_k), round(8 * px_k)))
+    style.configure("Big.TButton", font=FONT_BIG, padding=(round(22 * px_k), round(10 * px_k)))
     style.configure("TLabel", font=FONT)
     style.configure("Hint.TLabel", font=FONT_SMALL, foreground="#666666")
 
@@ -226,9 +295,26 @@ def run_gui():
     match_var = tk.StringVar(value="")
     ttk.Label(srch, textvariable=match_var, style="Hint.TLabel").pack(side="left", padx=(12, 0))
 
+    # 底栏（先于列表 pack 到底部：窗口不够高的时候缩的是列表，不是这排按钮）
+    bottom = ttk.Frame(root, padding=(14, 10, 14, 14))
+    bottom.pack(side="bottom", fill="x")
+    ttk.Button(bottom, text="出歌单 txt", command=lambda: do_playlist()).pack(side="left")
+    ttk.Button(bottom, text="一键编号", style="Big.TButton", command=lambda: do_number()).pack(side="left", padx=(12, 0))
+    ttk.Button(bottom, text="撤销上次编号", command=lambda: do_undo()).pack(side="right")
+    where_var = tk.StringVar()
+    ttk.Button(bottom, textvariable=where_var, command=lambda: choose_playlist_dir()).pack(side="right", padx=(0, 12))
+
+    side = ttk.Frame(root, padding=(14, 8, 14, 0))
+    side.pack(side="bottom", fill="x")
+    ttk.Button(side, text="置顶", command=lambda: move_selected("top")).pack(side="left")
+    ttk.Button(side, text="上移", command=lambda: move_selected(-1)).pack(side="left", padx=(10, 0))
+    ttk.Button(side, text="下移", command=lambda: move_selected(1)).pack(side="left", padx=(10, 0))
+    count_var = tk.StringVar(value="")
+    ttk.Label(side, textvariable=count_var, style="Hint.TLabel").pack(side="right")
+
     # 列表
     mid = ttk.Frame(root, padding=(14, 0, 14, 0))
-    mid.pack(fill="both", expand=True)
+    mid.pack(side="top", fill="both", expand=True)
     cols = ("num", "name")
     tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
     tree.heading("num", text="序号")
@@ -240,21 +326,6 @@ def run_gui():
     tree.configure(yscrollcommand=vsb.set)
     tree.pack(side="left", fill="both", expand=True)
     vsb.pack(side="right", fill="y")
-
-    side = ttk.Frame(root, padding=(14, 8, 14, 0))
-    side.pack(fill="x")
-    ttk.Button(side, text="置顶", command=lambda: move_selected("top")).pack(side="left")
-    ttk.Button(side, text="上移", command=lambda: move_selected(-1)).pack(side="left", padx=(10, 0))
-    ttk.Button(side, text="下移", command=lambda: move_selected(1)).pack(side="left", padx=(10, 0))
-    count_var = tk.StringVar(value="")
-    ttk.Label(side, textvariable=count_var, style="Hint.TLabel").pack(side="right")
-
-    # 底栏
-    bottom = ttk.Frame(root, padding=(14, 10, 14, 14))
-    bottom.pack(fill="x")
-    ttk.Button(bottom, text="一键编号", style="Big.TButton", command=lambda: do_number()).pack(side="right")
-    ttk.Button(bottom, text="撤销上次编号", command=lambda: do_undo()).pack(side="right", padx=(0, 12))
-    ttk.Button(bottom, text="出歌单 txt", command=lambda: do_playlist()).pack(side="left")
 
     # ---- 函数 ----
     def filtering():
@@ -389,11 +460,38 @@ def run_gui():
         load(state["folder"])
         messagebox.showinfo("已撤销", f"{n} 首歌改回去了。")
 
+    def refresh_where():
+        d = playlist_dir(state["settings"])
+        if os.path.normcase(d) == os.path.normcase(desktop_dir()):
+            where_var.set("歌单存到：桌面")
+        else:
+            tail = os.path.basename(d.rstrip("\\/")) or d
+            where_var.set(f"歌单存到：{tail}")
+
+    def choose_playlist_dir():
+        d = filedialog.askdirectory(initialdir=playlist_dir(state["settings"]),
+                                    title="以后出的歌单都存到这个文件夹（选桌面就是存桌面）")
+        if not d:
+            return
+        state["settings"]["playlist_dir"] = os.path.normpath(d)
+        try:
+            save_settings(state["settings"])
+        except OSError as e:
+            messagebox.showerror("没记住", f"这个设置存不下来：\n{e}")
+        refresh_where()
+
+    refresh_where()
+
     def do_playlist():
         if not state["items"]:
             messagebox.showinfo("先打开", "先点左上角「打开 U 盘 / 文件夹」。")
             return
-        out = write_playlist(state["folder"], state["items"])
+        out_dir = playlist_dir(state["settings"])
+        try:
+            out = write_playlist(out_dir, state["items"])
+        except OSError as e:
+            messagebox.showerror("没存成", f"歌单存不进这个文件夹：\n{out_dir}\n\n{e}")
+            return
         try:
             open_file(out)
         except OSError:
