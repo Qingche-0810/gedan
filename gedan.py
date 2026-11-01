@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """歌单排序 —— 给家里老人的 U 盘歌曲一键编号工具。
 
-打开 U 盘 → 列表排好 → 想动就拖 → 一键编号 → 所有歌变成 001-xxx、002-xxx。
+打开 U 盘 → 列表排好 → 想动就拖 → 一键编号 → 所有歌变成 001-xxx、002-xxx，\n并把 U 盘目录里登记的先后也理成这个顺序（音响按登记先后放，不按文件名）。
 """
 import json
 import os
@@ -147,6 +147,91 @@ def undo(folder):
     apply_renames(folder, plan)
     os.remove(os.path.join(folder, UNDO_FILE))
     return len(plan)
+
+
+# ---------------- 目录顺序（音响按这个放，不按文件名） ----------------
+
+STAGE_PREFIX = "~GEDAN"   # 大写、不超过 8 个字，在 U 盘上只占一格登记位
+
+
+def _dir_order(folder, names):
+    """按 U 盘目录里登记的先后，返回 names 里有的那些。"""
+    want = set(names)
+    return [n for n in os.listdir(folder) if n in want]
+
+
+def _make_stage(folder, k):
+    p = os.path.join(folder, f"{STAGE_PREFIX}{k}")
+    os.mkdir(p)
+    return p
+
+
+def _front_stage(folder, stage):
+    """让临时文件夹的登记位挪到最前面，这样搬回来的歌才会一个接一个排在它后面。
+
+    探法：在这一层新建一个只占一格的小文件，看它登记在临时文件夹前面还是后面；
+    在前面就说明前头还有空位，再建一个临时文件夹（会落到那个空位），把东西搬过去。
+    """
+    k = 1
+    for _ in range(8):
+        probe = os.path.join(folder, f"{STAGE_PREFIX}P")
+        with open(probe, "w"):
+            pass
+        order = os.listdir(folder)
+        before = order.index(os.path.basename(probe)) < order.index(os.path.basename(stage))
+        os.remove(probe)
+        if not before:
+            return stage
+        k += 1
+        new = _make_stage(folder, k)
+        for n in os.listdir(stage):
+            os.rename(os.path.join(stage, n), os.path.join(new, n))
+        os.rmdir(stage)
+        stage = new
+    return stage
+
+
+def reorder_directory(folder, ordered_names):
+    """把这一层目录的登记顺序理成 ordered_names 的顺序。返回理完以后顺序对不对。
+
+    很多音响、车机不看文件名，按目录里登记的先后放歌，也就是拷进 U 盘的先后。
+    改名不动登记顺序，所以文件名排成 001、002 了，放出来还是老顺序。
+    办法：把这一层的东西全搬进一个临时文件夹（同一个盘里搬只改登记、不拷数据，一瞬间），
+    再按顺序一个个搬回来。歌在前，其它文件跟在后面。搬不动的（系统文件夹）就留在原地。
+    中途出错，临时文件夹里的东西全部搬回原处再抛出。
+    """
+    ordered_names = list(ordered_names)
+    stage = None
+    try:
+        stage = _make_stage(folder, 1)
+        moved = []
+        for n in os.listdir(folder):
+            if n.startswith(STAGE_PREFIX):
+                continue
+            try:
+                os.rename(os.path.join(folder, n), os.path.join(stage, n))
+                moved.append(n)
+            except OSError:
+                pass            # 搬不动的留在原地
+        stage = _front_stage(folder, stage)
+        in_order = [n for n in ordered_names if n in set(moved)]
+        rest = [n for n in moved if n not in set(in_order)]
+        for n in in_order + rest:
+            os.rename(os.path.join(stage, n), os.path.join(folder, n))
+        os.rmdir(stage)
+        stage = None
+    finally:
+        if stage and os.path.isdir(stage):
+            for n in os.listdir(stage):
+                try:
+                    os.rename(os.path.join(stage, n), os.path.join(folder, n))
+                except OSError:
+                    pass
+            try:
+                os.rmdir(stage)
+            except OSError:
+                pass
+    return _dir_order(folder, ordered_names) == ordered_names
 
 
 SETTINGS_FILE = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "歌单排序", "设置.json")
@@ -430,22 +515,43 @@ def run_gui():
             return
         plan = plan_renames(state["items"])
         if not plan:
-            messagebox.showinfo("已经好了", "编号已经是对的，不用再改。")
-            return
-        if not messagebox.askyesno("确认编号",
-                                   f"要把 {len(plan)} 首歌的文件名改成 001-、002- 这样吗？\n\n改错了可以点「撤销上次编号」退回。"):
-            return
+            if not messagebox.askyesno("编号已经是对的",
+                                       "文件名已经是 001-、002- 排好的。\n\n"
+                                       "要不要把 U 盘里的播放顺序也理一遍？\n"
+                                       "（音响不看文件名，按歌拷进 U 盘的先后放；理一遍是一瞬间的事，不改任何文件名。）"):
+                return
+            done = []
+        else:
+            if not messagebox.askyesno("确认编号",
+                                       f"要把 {len(plan)} 首歌的文件名改成 001-、002- 这样吗？\n"
+                                       f"改完顺手把 U 盘里的播放顺序也理好。\n\n改错了可以点「撤销上次编号」退回。"):
+                return
+            try:
+                done = apply_renames(state["folder"], plan)
+                save_undo(state["folder"], done)
+            except OSError as e:
+                load(state["folder"])
+                messagebox.showerror("没改成",
+                                     f"有首歌可能正在播放，改不了名。已经全部退回原样，什么都没动。\n"
+                                     f"先把播放器关掉，再点一次「一键编号」。\n\n{e}")
+                return
+        load(state["folder"])
         try:
-            done = apply_renames(state["folder"], plan)
-            save_undo(state["folder"], done)
+            in_order = reorder_directory(state["folder"], [t[0] for t in state["items"]])
         except OSError as e:
             load(state["folder"])
-            messagebox.showerror("没改成",
-                                 f"有首歌可能正在播放，改不了名。已经全部退回原样，什么都没动。\n"
-                                 f"先把播放器关掉，再点一次「一键编号」。\n\n{e}")
+            messagebox.showwarning("编号好了，顺序没理完",
+                                   f"文件名都改好了，但 U 盘里的播放顺序没理成，可能有东西正占着。\n"
+                                   f"把播放器和资源管理器关了，再点一次「一键编号」就行。\n\n{e}")
             return
         load(state["folder"])
-        messagebox.showinfo("好了", f"已经给 {len(done)} 首歌编好号。")
+        head = f"已经给 {len(done)} 首歌编好号，" if done else "文件名没动，"
+        if in_order:
+            messagebox.showinfo("好了", head + "U 盘里的播放顺序也理好了。\n\n插到音响上就是按这个顺序放。")
+        else:
+            messagebox.showwarning("顺序没完全理好",
+                                   head + "但 U 盘目录里的顺序还没完全对上。\n"
+                                   "再点一次「一键编号」通常就好；还不行就把歌先拷到电脑上，清空 U 盘再拷回去。")
 
     def do_undo():
         if not state["folder"]:
